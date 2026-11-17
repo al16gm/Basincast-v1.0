@@ -1,0 +1,32 @@
+{
+  "software": "BasinCast API v1.0",
+  "engine_version": "1.0.0",
+  "engine_code_unmodified": true,
+  "end_to_end_tests": "30/30 passed",
+  "real_http_test": "GET /health and POST /v1/forecast passed using 432-month river example",
+  "hosting": "Render Free (limits apply); frontend AI Studio Starter (eligibility required)",
+  "files": {
+    ".gitignore": "a771975e14329a22893fb2198c20e06161f674d98be17501251edf4eda092f4a",
+    ".python-version": "7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d",
+    "AI_STUDIO_PROMPT_EN.md": "d6051fed0f7e3a4e43c1a435e4fe7c1e5a09bc170cb2c2e5d9c11d7f1722e36a",
+    "README_ES.md": "e76f565dc267ccbb5e9426c4728be8fd21007c9d7fb70e8ae8520207da1bf0b2",
+    "api/__init__.py": "82ea5b5a830ee66c22766d86af5d8dcd19ce06b93c91e2f49525e9fcf7af74a8",
+    "api/main.py": "c6d71a71af07612c8556c1029d3b938564566ff414cb201b052b46d3a1481333",
+    "basincast/__init__.py": "30f360926cc1a4cf3c62ae5b1d567659a8c5dc1ac3becccc1ae6c10961f2c238",
+    "basincast/__main__.py": "7164bcc8498d311f200a1d8dfdd240b6b9f060f55925bc06f2fe662791736551",
+    "basincast/cli.py": "cc6434f56f9c6b13dcbd732e89ff67a8716c275d4c2955e37b1c6e240edad1c9",
+    "basincast/climate.py": "dca60aa2994b1643344294fe6d103e6b977e9f783b72229ee168874443c3fb26",
+    "basincast/engine.py": "5aa63e40554818e4104a7e81ee97d0d56fb10681a73321405b93546c1af5f52f",
+    "basincast/input.py": "21ca91d5c65489c1051d8cd1e7dd84d853297aeda5256d582beaacc13b7015f4",
+    "basincast/metrics.py": "dea59291a343eeb7150a58ccb7deffba5dd2e8d1791c030b623e9542d4c5bd67",
+    "basincast/open_data.py": "389aac59d4cb8c3309efc3c49147abfb971220112404117773c8a0d4731b5e0e",
+    "basincast/schema.py": "b4cfec5bbcd5421678ddd9fff2396e5dff8167cf8bd53ca82bacae81c954bee1",
+    "examples/river_2_columns.csv": "c20dbc0f25a41b992279c5bf6601fa919b4a140bfe000718a53b3e10098e6081",
+    "examples/river_jucar_real.csv": "1d4f77b34040e82270f85a626a112ae262fd6a6ecc5fd047510c76bf6ed9a5c7",
+    "pyproject.toml": "17a563c41f8d6c21223d95c4cceae75962d571f91bc344619c9f77ce2adf4b93",
+    "render.yaml": "e64f801f1e3ca601dfc6bf047d77c8ca71a12f6b4471d823b10451c0c6b0f148",
+    "requirements-api.txt": "c58a42c417a4276116ec81561d9c5cfef21886567f2c8be169537475b16faa94",
+    "tests/test_api.py": "8a8752bda9f647370483aee92badaea38d3188ddf2648453093ac733f37359b8",
+    "tests/test_engine_v1.py": "7fd3a53c363f5489f6149472d281b1efe8b81ac55cc2e8bf389423c26d202dce"
+  }
+}

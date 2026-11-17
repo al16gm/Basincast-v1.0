@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: basincast-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-api.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: BASINCAST_REQUIRE_API_KEY
+        value: "1"
+      - key: BASINCAST_API_KEY
+        sync: false
+      - key: BASINCAST_MAX_CONCURRENT_JOBS
+        value: "1"
+      - key: BASINCAST_MAX_UPLOAD_BYTES
+        value: "5242880"
