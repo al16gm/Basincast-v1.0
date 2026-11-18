@@ -45,6 +45,13 @@ def normalize_user_file(
         raise ValueError(f"Unsupported data_status {data_status!r}")
     if not unit.strip() or not source_description.strip():
         raise ValueError("Unit and source_description cannot be empty")
+    # These metadata fields are written to CSV exports. Reject spreadsheet
+    # formula prefixes rather than exporting text that Excel may execute.
+    for field_name, field_value in (("unit", unit), ("source_description", source_description)):
+        if field_value.lstrip().startswith(("=", "+", "-", "@")) or any(
+            ch in field_value for ch in ("\r", "\n", "\t")
+        ):
+            raise ValueError(f"Unsafe {field_name}: formula prefixes and control characters are not allowed")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", series_id):
         raise ValueError("series_id must contain only letters, numbers, _, - or .")
     if capacity is not None and (not np.isfinite(capacity) or capacity <= 0):
