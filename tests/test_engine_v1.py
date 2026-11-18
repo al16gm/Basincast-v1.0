@@ -49,7 +49,7 @@ class InputAndEngineTests(unittest.TestCase):
             result=run_series(case,cfg)
             self.assertEqual(len(result['forecast']),48)
             self.assertEqual(result['audit']['empirical_contiguous_horizon_months'],48)
-            self.assertTrue(result['forecast'].is_recommended.all())
+            self.assertTrue(result['forecast'].is_supported_prediction.all())
             self.assertTrue(result['metrics'].quality_supported.all())
             self.assertEqual(int(result['metrics'].iloc[-1].n_disjoint_origin_windows_proxy),4)
 
@@ -61,7 +61,7 @@ class InputAndEngineTests(unittest.TestCase):
             case=load_series(norm)
             result=run_series(case,adaptive_config(70,max_horizon=48))
             self.assertEqual(len(result['forecast']),48)
-            self.assertTrue((result['forecast'].loc[result['forecast'].horizon_months>15,'is_recommended']==False).all())
+            self.assertTrue((result['forecast'].loc[result['forecast'].horizon_months>15,'is_supported_prediction']==False).all())
             self.assertTrue((result['forecast'].loc[result['forecast'].horizon_months>25,'quality_supported']==False).all())
 
     def test_observational_test_alteration_does_not_reselect(self):
@@ -143,8 +143,9 @@ class InputAndEngineTests(unittest.TestCase):
                 manifest=json.loads(bundle.read('manifest.json'))
                 for name,digest in manifest['files_sha256'].items():
                     self.assertEqual(hashlib.sha256(bundle.read(name)).hexdigest(),digest)
-                self.assertIn('recommended_forecast.csv',bundle.namelist())
+                self.assertIn('supported_forecast.csv',bundle.namelist())
                 self.assertEqual(len(pd.read_csv(bundle.open('forecast_all_candidates.csv'))),12)
+                self.assertIn('planning_guidance.csv',bundle.namelist())
             with self.assertRaisesRegex(ValueError,'Output exists'):
                 run_forecast(raw,Path(tmp)/'run',series_id='FieldWell',asset_type='aquifer',unit='m')
 
@@ -216,7 +217,7 @@ class AdditionalSafetyTests(unittest.TestCase):
                         pd.Series(np.arange(24,dtype=float),index=dates),'raw')
         result=run_short_series(case,48)
         self.assertEqual(result['audit']['empirical_contiguous_horizon_months'],0)
-        self.assertFalse(result['forecast'].is_recommended.any())
+        self.assertFalse(result['forecast'].is_supported_prediction.any())
         self.assertEqual(len(result['forecast']),48)
         self.assertTrue(result['metrics'].kge.isna().all())
 
@@ -237,7 +238,7 @@ class AdditionalSafetyTests(unittest.TestCase):
         result=run_series(case,adaptive_config(60,max_horizon=48))
         self.assertEqual(len(result['forecast']),48)
         self.assertEqual(int(result['metrics'].iloc[-1].n_test_pairs),0)
-        self.assertFalse(bool(result['forecast'].iloc[-1].is_recommended))
+        self.assertFalse(bool(result['forecast'].iloc[-1].is_supported_prediction))
 
     def test_synthetic_example_provenance_never_claims_observed(self):
         with tempfile.TemporaryDirectory() as tmp:
