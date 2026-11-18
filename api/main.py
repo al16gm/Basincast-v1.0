@@ -1,4 +1,4 @@
-"""Stateless HTTP adapter for the unchanged BasinCast Engine v1.0.
+"""Stateless HTTP adapter for BasinCast Engine v1.1 automatic horizon.
 
 This module only validates requests, runs the tested Python engine and exports its
 outputs. No AI, weather service, database or probabilistic model is required.
@@ -23,6 +23,7 @@ from fastapi.responses import Response
 
 from basincast import __version__ as engine_version
 from basincast.cli import run_forecast
+from basincast.engine import ANALYSIS_CEILING_MONTHS
 
 LOGGER = logging.getLogger("basincast_api")
 MAX_UPLOAD_BYTES = int(os.getenv("BASINCAST_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
@@ -34,11 +35,12 @@ REQUIRE_API_KEY = os.getenv("BASINCAST_REQUIRE_API_KEY", "0") == "1"
 
 app = FastAPI(
     title="BasinCast Forecast API",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Stateless, reproducible monthly forecasts for user-provided observations. "
-        "No external climate data is needed. Forecast quality and incremental "
-        "Ridge skill are separate indicators."
+        "No user-selected forecast horizon: empirical reliability is determined "
+        "from rolling-origin KGE validation and a continuous-month rule. "
+        "Exploratory continuation is distinct from a validated prediction."
     ),
 )
 
@@ -75,7 +77,7 @@ def verify_api_key(x_api_key: Annotated[str | None, Header(alias="X-API-Key")] =
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "api_version": "1.0.0", "engine_version": engine_version}
+    return {"status": "ok", "api_version": "1.1.0", "engine_version": engine_version}
 
 
 @app.get("/v1/info")
@@ -85,8 +87,10 @@ def info() -> dict:
         "asset_types": ["river", "aquifer", "reservoir", "agricultural_demand", "urban_demand", "custom"],
         "formats": ["csv", "xlsx"],
         "required_columns": ["date", "value"],
-        "min_horizon_months": 1,
-        "max_horizon_months": 48,
+        "horizon_selection": "AUTOMATIC_KGE_CONTIGUOUS",
+        "analysis_ceiling_months": ANALYSIS_CEILING_MONTHS,
+        "kge_threshold": 0.60,
+        "forecast_phases": ["PREDICTION", "PLANNING_GUIDANCE"],
         "external_meteorology_required": False,
         "climate_scenarios_generated_by_this_api": False,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
@@ -131,7 +135,6 @@ def _execute_forecast(
     series_id: str,
     asset_type: AssetType,
     unit: str,
-    max_horizon_months: int,
     date_column: str,
     value_column: str,
     data_status: DataStatus,
@@ -141,8 +144,6 @@ def _execute_forecast(
     capacity: float | None,
     as_zip: bool,
 ) -> dict | bytes:
-    if max_horizon_months < 1 or max_horizon_months > 48:
-        raise HTTPException(status_code=422, detail="max_horizon_months must be 1..48")
     if not series_id or len(series_id) > 101:
         raise HTTPException(status_code=422, detail="Invalid series identifier")
     if not unit.strip() or len(unit) > 64:
@@ -183,7 +184,6 @@ def _execute_forecast(
                     series_id=series_id,
                     asset_type=asset_type,
                     unit=unit,
-                    max_horizon=max_horizon_months,
                     date_column=date_column,
                     value_column=value_column,
                     source_description=source_description,
@@ -203,13 +203,15 @@ def _execute_forecast(
             return {
                 "summary": summary,
                 "forecast": _records(root / "result" / "forecast_all_candidates.csv"),
-                "recommended_forecast": _records(root / "result" / "recommended_forecast.csv"),
+                "supported_forecast": _records(root / "result" / "supported_forecast.csv"),
+                "planning_guidance": _records(root / "result" / "planning_guidance.csv"),
                 "metrics": _records(root / "result" / "metrics_by_horizon.csv"),
                 "zip_sha256": hashlib.sha256(Path(result["result_zip"]).read_bytes()).hexdigest(),
                 "interpretation": (
-                    "Quality support requires KGE in chronological validation and test, "
-                    "adequate sample and continuous lead times. Ridge RMSE gain is a "
-                    "separate diagnostic; predicted resources are not inferred water demand."
+                    "The model determines the continuous supported prediction horizon "
+                    "from KGE and sample support. All later numerical values are exploratory "
+                    "planning guidance, never validated predictions or management directives. "
+                    "Compare RMSE against persistence and seasonal baselines separately."
                 ),
             }
     finally:
@@ -223,7 +225,6 @@ def _form_forecast(
     series_id: str,
     asset_type: AssetType,
     unit: str,
-    max_horizon_months: int,
     date_column: str,
     value_column: str,
     data_status: DataStatus,
@@ -238,7 +239,6 @@ def _form_forecast(
         series_id=series_id,
         asset_type=asset_type,
         unit=unit,
-        max_horizon_months=max_horizon_months,
         date_column=date_column,
         value_column=value_column,
         data_status=data_status,
@@ -256,7 +256,6 @@ def forecast(
     series_id: Annotated[str, Form()] = "Site_001",
     asset_type: Annotated[AssetType, Form()] = "river",
     unit: Annotated[str, Form()] = "m3/s",
-    max_horizon_months: Annotated[int, Form()] = 12,
     date_column: Annotated[str, Form()] = "date",
     value_column: Annotated[str, Form()] = "value",
     data_status: Annotated[DataStatus, Form()] = "USER_PROVIDED_UNVERIFIED",
@@ -266,7 +265,7 @@ def forecast(
     capacity: Annotated[float | None, Form()] = None,
 ) -> dict:
     return _form_forecast(
-        file, series_id, asset_type, unit, max_horizon_months, date_column,
+        file, series_id, asset_type, unit, date_column,
         value_column, data_status, source_description, aggregation,
         decimal_comma, capacity, False,
     )
@@ -278,7 +277,6 @@ def forecast_zip(
     series_id: Annotated[str, Form()] = "Site_001",
     asset_type: Annotated[AssetType, Form()] = "river",
     unit: Annotated[str, Form()] = "m3/s",
-    max_horizon_months: Annotated[int, Form()] = 12,
     date_column: Annotated[str, Form()] = "date",
     value_column: Annotated[str, Form()] = "value",
     data_status: Annotated[DataStatus, Form()] = "USER_PROVIDED_UNVERIFIED",
@@ -288,7 +286,7 @@ def forecast_zip(
     capacity: Annotated[float | None, Form()] = None,
 ) -> Response:
     payload = _form_forecast(
-        file, series_id, asset_type, unit, max_horizon_months, date_column,
+        file, series_id, asset_type, unit, date_column,
         value_column, data_status, source_description, aggregation,
         decimal_comma, capacity, True,
     )
