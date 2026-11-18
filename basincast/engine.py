@@ -1,7 +1,9 @@
-"""One shared, leakage-aware monthly forecasting engine for all target types.
+"""Direct-horizon monthly forecasts with automatic reliability classification.
 
-The models are direct-horizon (rather than recursive). A frozen model is
-selected before the external test window; that test is never used for selection.
+Forecasts are direct rather than recursive. Each lead has an independent
+chronological evaluation; the evaluation split is independent of the number
+of horizons returned. The continuous supported interval ends at the first
+horizon with insufficient evidence or KGE below the specified threshold.
 """
 from __future__ import annotations
 from dataclasses import dataclass, asdict
@@ -15,10 +17,13 @@ from sklearn.preprocessing import StandardScaler
 from .schema import SeriesData, NONNEGATIVE
 from .metrics import rmse, kge, nse, disjoint_origin_windows
 
+ANALYSIS_CEILING_MONTHS = 48
+EVALUATION_PROTOCOL_ID = "BC_DIRECT_AUTO_HORIZON_1_1"
+
 
 @dataclass(frozen=True)
 class EngineConfig:
-    max_horizon: int = 12
+    max_horizon: int = ANALYSIS_CEILING_MONTHS
     test_months: int = 60
     validation_months: int = 24
     min_prevalidation_months: int = 60
@@ -123,7 +128,7 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
     locked before the holdout. Evaluating the holdout requires target observed.
     """
     cfg = config or EngineConfig()
-    if cfg.max_horizon < 1 or cfg.max_horizon > 48:
+    if cfg.max_horizon < 1 or cfg.max_horizon > ANALYSIS_CEILING_MONTHS:
         raise ValueError('max_horizon must be in [1,48]')
     if cfg.test_months < 24 or cfg.validation_months < 12:
         raise ValueError('Require >=24 test months and >=12 validation months')
@@ -178,6 +183,12 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
                                    "validation_selected_baseline":baseline})
             rmse_baseline = rmse(truth, baseline_test)
             rmse_chosen = rmse(truth, chosen_test)
+            rmse_persistence = rmse(truth, test.persistence.to_numpy(dtype=float))
+            rmse_seasonal = rmse(truth, test.seasonal.to_numpy(dtype=float))
+            skill_persistence = (1.0 - rmse_chosen / rmse_persistence
+                                 if rmse_persistence > 1e-12 else float('nan'))
+            skill_seasonal = (1.0 - rmse_chosen / rmse_seasonal
+                              if rmse_seasonal > 1e-12 else float('nan'))
             n_windows = disjoint_origin_windows(test.origin_date.to_list(), h)
             kge_chosen = kge(truth, chosen_test)
             kge_baseline = kge(truth, baseline_test)
@@ -187,13 +198,23 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
             validation_kge = kge(validation_truth, validation_pred)
             # KGE is necessary but not sufficient for quality support; require
             # chronological validation, test support and disjoint-origin diagnostic.
-            quality_supported = bool(
-                len(valid) >= cfg.min_validation_pairs and
-                len(test) >= cfg.min_evaluation_pairs and
-                n_windows >= cfg.min_disjoint_windows and
-                np.isfinite(validation_kge) and validation_kge >= cfg.kge_threshold and
-                np.isfinite(kge_chosen) and kge_chosen >= cfg.kge_threshold
-            )
+            if len(valid) < cfg.min_validation_pairs:
+                support_reason = 'INSUFFICIENT_VALIDATION_PAIRS'
+            elif len(test) < cfg.min_evaluation_pairs:
+                support_reason = 'INSUFFICIENT_TEST_PAIRS'
+            elif n_windows < cfg.min_disjoint_windows:
+                support_reason = 'INSUFFICIENT_DISJOINT_WINDOWS'
+            elif not np.isfinite(validation_kge):
+                support_reason = 'UNDEFINED_VALIDATION_KGE'
+            elif not np.isfinite(kge_chosen):
+                support_reason = 'UNDEFINED_TEST_KGE'
+            elif validation_kge < cfg.kge_threshold:
+                support_reason = 'VALIDATION_KGE_BELOW_THRESHOLD'
+            elif kge_chosen < cfg.kge_threshold:
+                support_reason = 'TEST_KGE_BELOW_THRESHOLD'
+            else:
+                support_reason = 'SUPPORTED'
+            quality_supported = support_reason == 'SUPPORTED'
             skill = float(1-rmse_chosen/rmse_baseline) if rmse_baseline > 1e-12 else float('nan')
             incremental_gain = bool(candidate == 'ridge' and np.isfinite(skill) and skill > 0.0)
             if not quality_supported:
@@ -206,7 +227,9 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
                 label = 'RIDGE_KGE_NO_RMSE_GAIN'
         else:
             rmse_chosen=rmse_baseline=kge_chosen=kge_baseline=skill=validation_kge=float('nan')
+            rmse_persistence=rmse_seasonal=skill_persistence=skill_seasonal=float('nan')
             n_windows=0; quality_supported=False; incremental_gain=False
+            support_reason='INSUFFICIENT_TEST_PAIRS'
             label='NOT_DEMONSTRATED'; nclip=0
         metrics.append({"series_id":case.series_id, "asset_type":case.asset_type,
                         "data_status":case.data_status,"horizon_months":h,
@@ -221,8 +244,13 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
                         "kge_validation":_safe_float(validation_kge),
                         "kge_baseline_on_test":_safe_float(kge_baseline),
                         "quality_supported":bool(quality_supported),
+                        "support_reason":support_reason,
                         "ridge_has_rmse_gain":bool(incremental_gain),
                         "rmse":_safe_float(rmse_chosen),
+                        "rmse_persistence":_safe_float(rmse_persistence),
+                        "rmse_seasonal":_safe_float(rmse_seasonal),
+                        "rmse_skill_vs_persistence":_safe_float(skill_persistence),
+                        "rmse_skill_vs_seasonal":_safe_float(skill_seasonal),
                         "nse":_safe_float(nse(test.y_true, chosen_test)) if len(test) else None,
                         "rmse_validation_selected_baseline_on_test":_safe_float(rmse_baseline),
                         "rmse_skill_vs_validation_selected_baseline":_safe_float(skill),
@@ -252,6 +280,7 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
                           "predicted_value":float(adjusted[0]),
                           "selected_model":candidate,"reliability_label":label,
                           "quality_supported":bool(quality_supported),
+                          "support_reason":support_reason,
                           "ridge_has_rmse_gain":bool(incremental_gain),
                           "data_status":case.data_status,
                           "is_climate_projection":False,
@@ -263,14 +292,35 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
                              "training_targets_lte_pretest":True})
     metric_frame = pd.DataFrame(metrics)
     empirical_horizon = 0
+    first_failure = None
     for row in metrics:
         if row['quality_supported']:
             empirical_horizon = int(row['horizon_months'])
         else:
+            first_failure = {
+                'month': int(row['horizon_months']),
+                'reason': row['support_reason'],
+            }
             break
     issued_forecasts = pd.DataFrame(forecasts)
-    issued_forecasts['is_recommended'] = issued_forecasts.horizon_months.le(empirical_horizon)
+    supported = issued_forecasts.horizon_months.le(empirical_horizon)
+    issued_forecasts['is_supported_prediction'] = supported
+    issued_forecasts['is_planning_guidance'] = ~supported
+    issued_forecasts['forecast_phase'] = np.where(supported, 'PREDICTION', 'PLANNING_GUIDANCE')
     issued_forecasts['max_contiguous_supported_months'] = empirical_horizon
+    issued_forecasts['planning_guidance_note'] = np.where(
+        supported,
+        '',
+        'Exploratory numerical continuation; not a validated prediction or an operational management directive.',
+    )
+    # A later isolated KGE recovery never restores supported status: the
+    # prediction phase must be continuous from the one-month-ahead lead.
+    metric_frame['within_contiguous_supported_horizon'] = (
+        metric_frame.horizon_months.le(empirical_horizon)
+    )
+    metric_frame['forecast_phase'] = np.where(
+        metric_frame['within_contiguous_supported_horizon'], 'PREDICTION', 'PLANNING_GUIDANCE'
+    )
     result = {"backtest_pairs":pd.DataFrame(eval_pairs),"metrics":metric_frame,
               "forecast":issued_forecasts,
               "audit": {"series_id":case.series_id,"asset_type":case.asset_type,
@@ -282,12 +332,18 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
                         "calibration_validation_start":str(dates[val_start].date()),
                         "n_out_of_sample_predictions":len(eval_pairs),
                         "empirical_contiguous_horizon_months":empirical_horizon,
+                        "first_unsupported_horizon":first_failure,
+                        "search_ceiling_months":cfg.max_horizon,
+                        "search_ceiling_reached_with_full_support":first_failure is None,
                         "horizon_is_provisional":True,
+                        "evaluation_protocol_id":EVALUATION_PROTOCOL_ID,
+                        "split_selection_depends_on_requested_horizon":False,
                         "intervals_are_calibrated":False,
                         "validation_is_on_reported_observations":case.data_status=='OBSERVED_REPORTED',
                         "nonoverlap_count_is_not_effective_sample_size":True,
                         "algorithm":"DIRECT_HORIZON_RIDGE_OR_TEMPORAL_BASELINES",
-                        "quality_rule":"KGE >= threshold on validation AND test, minimum chronological samples, and disjoint-origin diagnostic",
+                        "quality_rule":"Contiguous lead months with validation and test KGE >= threshold plus minimum chronological support; first failure ends supported prediction phase",
+                        "aquifer_kge_caveat":"Absolute-level KGE is sensitive to the reference datum; check errors and persistence skill before management decisions" if case.asset_type == 'aquifer' else None,
                         "incremental_skill_rule":"Ridge selected AND holdout RMSE < validation-selected baseline RMSE",
                         "horizon_is_statistical_not_a_guarantee":True,
                         "physical_bound":"NONNEGATIVE" if case.asset_type in NONNEGATIVE else "NONE",
@@ -297,31 +353,35 @@ def run_series(case: SeriesData, config: EngineConfig | None = None):
     return result
 
 
-def adaptive_config(n_months: int, max_horizon: int = 12, *,
+def adaptive_config(n_months: int, max_horizon: int = ANALYSIS_CEILING_MONTHS, *,
                     kge_threshold: float = 0.60) -> EngineConfig:
-    """Choose time splits from series length alone (never from held-out values).
+    """Select chronological windows from record length, never forecast request.
 
-    The longest *potentially* supported horizon has at least four disjoint
-    origin intervals, at least eight validation pairs, and prevalidation
-    history; other requested horizons are reported as unvalidated when their
-    evidence is insufficient. Return still forecasts all requested horizons.
+    The maximum potentially supportable horizon is inferred from available
+    calendar months with a fixed ceiling. The chosen validation/test windows
+    therefore stay IDENTICAL when a caller evaluates a subset of leads.
+    Returning unsupported horizons is allowed, but they are never designated
+    as validated predictions.
     """
-    if max_horizon < 1 or max_horizon > 48:
+    if not 1 <= max_horizon <= ANALYSIS_CEILING_MONTHS:
         raise ValueError('max_horizon must be between 1 and 48 months')
+    if not np.isfinite(kge_threshold) or not -1.0 <= kge_threshold <= 1.0:
+        raise ValueError('kge_threshold must be a finite number in [-1, 1]')
     if n_months < 60:
         raise ValueError('At least 60 calendar months required for this validated engine; shorter records need a descriptive baseline-only workflow')
     min_pre = 60 if n_months >= 120 else 24
     min_valid = 8 if n_months >= 120 else 6
-    max_potential = max(1, (n_months - min_pre - min_valid - 2) // 5)
-    chosen = min(max_horizon, max_potential)
-    validation = max(12, chosen + min_valid)
-    test = max(24, 4*chosen + 1)
-    # Keep the maximum amount of validation for long series without violating
-    # the minimum prevalidation history.
-    while n_months - validation - test < min_pre and chosen > 1:
-        chosen -= 1
-        validation = max(12, chosen + min_valid)
-        test = max(24, 4*chosen+1)
+    max_potential = min(ANALYSIS_CEILING_MONTHS,
+                        max(1, (n_months - min_pre - min_valid - 2) // 5))
+    # IMPORTANT: max_horizon intentionally DOES NOT influence these windows.
+    # This prevents changing first-month KGE by changing the output length.
+    evaluated_potential = max_potential
+    validation = max(12, evaluated_potential + min_valid)
+    test = max(24, 4 * evaluated_potential + 1)
+    while n_months - validation - test < min_pre and evaluated_potential > 1:
+        evaluated_potential -= 1
+        validation = max(12, evaluated_potential + min_valid)
+        test = max(24, 4 * evaluated_potential + 1)
     if n_months - validation - test < min_pre:
         raise ValueError('Insufficient history for strict chronological validation')
     return EngineConfig(max_horizon=max_horizon, test_months=test,
@@ -331,7 +391,7 @@ def adaptive_config(n_months: int, max_horizon: int = 12, *,
                         kge_threshold=kge_threshold)
 
 
-def run_short_series(case: SeriesData, max_horizon: int = 12):
+def run_short_series(case: SeriesData, max_horizon: int = ANALYSIS_CEILING_MONTHS):
     """Explicit, UNVALIDATED baseline forecasts for 12--59 calendar months.
 
     No KGE, skill, validation or reliable horizon can be estimated using the
@@ -362,7 +422,10 @@ def run_short_series(case: SeriesData, max_horizon: int = 12):
             'selected_model':'seasonal_unvalidated',
             'reliability_label':'NOT_DEMONSTRATED',
             'quality_supported':False,'ridge_has_rmse_gain':False,
-            'is_recommended':False,'max_contiguous_supported_months':0,
+            'is_supported_prediction':False,'is_planning_guidance':True,
+            'forecast_phase':'PLANNING_GUIDANCE',
+            'planning_guidance_note':'Insufficient observed history for chronological validation; not a validated prediction or operational directive.',
+            'max_contiguous_supported_months':0,
             'data_status':case.data_status,'is_climate_projection':False,
             'has_calibrated_predictive_interval':False,
         })
@@ -374,8 +437,13 @@ def run_short_series(case: SeriesData, max_horizon: int = 12):
             'n_test_pairs':0,'n_disjoint_origin_windows_proxy':0,
             'kge':None,'kge_validation':None,'rmse':None,'nse':None,
             'rmse_skill_vs_validation_selected_baseline':None,
-            'quality_supported':False,'ridge_has_rmse_gain':False,
+            'quality_supported':False,'support_reason':'INSUFFICIENT_RECORD_LENGTH',
+            'ridge_has_rmse_gain':False,
+            'rmse_persistence':None,'rmse_seasonal':None,
+            'rmse_skill_vs_persistence':None,'rmse_skill_vs_seasonal':None,
             'n_pred_clipped':nclip,'reliability_label':'NOT_DEMONSTRATED',
+            'within_contiguous_supported_horizon':False,
+            'forecast_phase':'PLANNING_GUIDANCE',
         })
     return {
         'backtest_pairs':pd.DataFrame(columns=['series_id','asset_type','origin_date','target_date','horizon_months','y_true','y_pred']),
@@ -389,7 +457,12 @@ def run_short_series(case: SeriesData, max_horizon: int = 12):
             'last_known_date':str(dates[-1].date()),
             'n_out_of_sample_predictions':0,
             'empirical_contiguous_horizon_months':0,
+            'first_unsupported_horizon':{'month':1,'reason':'INSUFFICIENT_RECORD_LENGTH'},
+            'search_ceiling_months':max_horizon,
+            'search_ceiling_reached_with_full_support':False,
             'horizon_is_provisional':True,
+            'evaluation_protocol_id':EVALUATION_PROTOCOL_ID,
+            'split_selection_depends_on_requested_horizon':False,
             'intervals_are_calibrated':False,
             'algorithm':'UNVALIDATED_SEASONAL_BASELINE_NO_TRAINING',
             'validation_is_on_reported_observations':False,
