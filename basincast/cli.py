@@ -1,4 +1,4 @@
-"""BasinCast Engine v1.0 CLI; pure forecast core plus optional climate deltas."""
+"""BasinCast Engine CLI: automatic empirical horizon and exploratory continuation."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ import sklearn
 
 from . import __version__
 from .climate import apply_climate_delta_csv
-from .engine import adaptive_config, run_series, run_short_series
+from .engine import ANALYSIS_CEILING_MONTHS, adaptive_config, run_series, run_short_series
 from .input import normalize_user_file
 from .open_data import get_open_meteo_monthly
 from .schema import load_series
@@ -38,7 +38,7 @@ def run_forecast(
     series_id: str,
     asset_type: str,
     unit: str,
-    max_horizon: int = 12,
+    max_horizon: int = ANALYSIS_CEILING_MONTHS,
     kge_threshold: float = 0.60,
     date_column: str = 'date',
     value_column: str = 'value',
@@ -50,10 +50,10 @@ def run_forecast(
     fixed_test_months: int | None = None,
     fixed_validation_months: int | None = None,
 ) -> dict:
-    """Prepare, evaluate, and export one case. Returns JSON-serializable summary.
+    """Prepare, evaluate, and export one case with an automatic supported horizon.
 
-    The public app should show only recommended_forecast.csv as a supported
-    trajectory. forecast_all_candidates.csv contains diagnostic extrapolations.
+    The public API always uses the 48-month analysis ceiling; max_horizon
+    exists here only for internal regression testing of horizon invariance.
     """
     source_path=Path(input_path)
     out=Path(output_dir)
@@ -86,8 +86,10 @@ def run_forecast(
     result['backtest_pairs'].to_csv(out/'backtest_pairs.csv',index=False)
     result['metrics'].to_csv(out/'metrics_by_horizon.csv',index=False)
     result['forecast'].to_csv(out/'forecast_all_candidates.csv',index=False)
-    recommended=result['forecast'][result['forecast'].is_recommended].copy()
-    recommended.to_csv(out/'recommended_forecast.csv',index=False)
+    supported = result['forecast'][result['forecast'].is_supported_prediction].copy()
+    guidance = result['forecast'][result['forecast'].is_planning_guidance].copy()
+    supported.to_csv(out/'supported_forecast.csv', index=False)
+    guidance.to_csv(out/'planning_guidance.csv', index=False)
     (out/'evaluation_audit.json').write_text(json.dumps(result['audit'],ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     summary={
         'software':'BasinCast Engine','version':__version__,
@@ -95,14 +97,19 @@ def run_forecast(
         'data_status':case.data_status,'source_description':case.source,
         'n_calendar_months':int(len(case.values)),'n_valid_observations':case.n_valid,
         'issue_date':result['audit']['last_known_date'],
-        'max_horizon_requested_months':max_horizon,
+        'horizon_selection':'AUTOMATIC_KGE_CONTIGUOUS',
+        'analysis_ceiling_months':max_horizon,
+        'kge_threshold':kge_threshold,
         'max_contiguous_supported_horizon_months':result['audit']['empirical_contiguous_horizon_months'],
+        'first_unsupported_horizon':result['audit']['first_unsupported_horizon'],
+        'search_ceiling_reached_with_full_support':result['audit']['search_ceiling_reached_with_full_support'],
         'isolated_supported_horizons_months':result['metrics'].loc[result['metrics'].quality_supported,'horizon_months'].astype(int).tolist(),
-        'n_recommended_months':int(len(recommended)),
+        'n_supported_prediction_months':int(len(supported)),
+        'n_planning_guidance_months':int(len(guidance)),
         'n_candidate_months':int(len(result['forecast'])),
         'n_backtest_pairs':int(len(result['backtest_pairs'])),
-        'data_note':'A point forecast does not imply calibrated uncertainty or guaranteed reliability',
-        'model_skill_note':'KGE quality is distinct from Ridge RMSE improvement relative to baseline',
+        'data_note':'Exploratory continuation is not a validated forecast, calibrated interval, or operational water-management directive',
+        'model_skill_note':'KGE qualification is distinct from model skill over persistence and seasonal baselines; high KGE does not ensure skill gain',
         'weather_note':'Hydrological forecast uses ONLY historical target values; no external weather, demand or IPCC input is required',
         'scenario_note':'Climate projection adapter is separate and does not imply hydrological impact',
         'io':io_audit,'configuration':asdict(cfg) if cfg is not None else {'mode':'SHORT_UNVALIDATED_SEASONAL_BASELINE','max_horizon':max_horizon},
@@ -137,7 +144,7 @@ def run_forecast(
 
 
 def main(argv: list[str] | None = None) -> None:
-    p=argparse.ArgumentParser(description='BasinCast Engine v1.0: monthly time series forecasting without required exogenous data')
+    p=argparse.ArgumentParser(description='BasinCast Engine: automatic KGE-based prediction horizon without exogenous data')
     sub=p.add_subparsers(dest='command',required=True)
     f=sub.add_parser('forecast',help='Forecast any monthly resource or demand using one CSV or Excel')
     f.add_argument('--input',required=True)
@@ -145,7 +152,7 @@ def main(argv: list[str] | None = None) -> None:
     f.add_argument('--series-id',required=True)
     f.add_argument('--type',dest='asset_type',choices=['river','aquifer','reservoir','agricultural_demand','urban_demand','custom'],required=True)
     f.add_argument('--unit',required=True)
-    f.add_argument('--max-horizon',type=int,default=12)
+    # No user-selected horizon. The engine assesses monthly leads through its fixed ceiling.
     f.add_argument('--kge-threshold',type=float,default=0.6)
     f.add_argument('--date-column',default='date')
     f.add_argument('--value-column',default='value')
@@ -174,7 +181,7 @@ def main(argv: list[str] | None = None) -> None:
     args=p.parse_args(argv)
     if args.command=='forecast':
         report=run_forecast(args.input,args.out,series_id=args.series_id,asset_type=args.asset_type,
-                            unit=args.unit,max_horizon=args.max_horizon,kge_threshold=args.kge_threshold,
+                            unit=args.unit,kge_threshold=args.kge_threshold,
                             date_column=args.date_column,value_column=args.value_column,
                             source_description=args.source,data_status=args.data_status,
                             aggregation=args.aggregation,decimal_comma=args.decimal_comma,capacity=args.capacity,
